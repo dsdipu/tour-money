@@ -1,0 +1,47 @@
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const assert = require('assert');
+const source = fs.readFileSync(path.join(__dirname,'..','app.js'),'utf8');
+const stub={innerHTML:'',addEventListener(){},querySelector(){return null}};
+let js=source.replace('startup();\n})();',`state=emptyState(); storeValues=async()=>{}; globalThis.testAPI={parseMoney,formatMoney,moneyPlain,summary,transact,buildPDF,validateState,exportCSV,saveTour,restoreState,restoreRecord,deleteRecord,catTotals,catOptions,recordRow,get:()=>state,set:s=>{state=s},getBackup:()=>backups,getSafety:()=>safety,getViewer:()=>viewer,render:()=>render(),goTab:t=>{tab=t;return render()},getHTML:()=>root.innerHTML};\n})();`)
+if(js===source)throw Error('Could not locate app end');
+const context={console,structuredClone,Intl,Date,JSON,Number,String,Math,Map,Set,Promise,TextEncoder,Blob,File,URL,crypto:require('crypto').webcrypto,setTimeout,clearTimeout,confirm:()=>true,document:{getElementById(id){return id==='app'?stub:id==='overlay-root'?{...stub}:stub},addEventListener(){}},navigator:{},location:{protocol:'https:'},FormData:class{},globalThis:null};context.globalThis=context;
+vm.createContext(context);vm.runInContext(js,context,{filename:'app.js'});
+const api=context.testAPI;
+const eq=(a,b)=>assert.deepStrictEqual(a,b);
+(async()=>{
+ eq(api.parseMoney('0.10')+api.parseMoney('0.20'),30);
+ eq(api.parseMoney('1,25,500.50'),12550050);
+ eq(api.formatMoney(12550050),'৳1,25,500.5');
+ let cat=api.get().categories[0].id;
+ await api.transact('Initial fund added',s=>{let t={id:'F1',title:'Initial fund',kind:'initial',amount:5000000,eventAt:'2026-11-16T10:00',deleted:false};s.transactions.push(t)});
+ await api.transact('Expense added',s=>{s.transactions.push({id:'E1',title:'Bus',kind:'expense',categoryId:cat,amount:1250500,eventAt:'2026-11-16T10:30',deleted:false})});
+ eq(api.summary().balance,3749500);
+ eq(api.getBackup().length,2);
+ await api.transact('Expense correction',s=>{s.transactions.find(t=>t.id==='E1').amount=2250500});
+ eq(api.summary().balance,2749500);
+ await api.transact('Delete expense',s=>{s.transactions.find(t=>t.id==='E1').deleted=true});
+ eq(api.summary().balance,5000000);
+ await api.transact('Restore expense',s=>{s.transactions.find(t=>t.id==='E1').deleted=false});
+ eq(api.summary().balance,2749500);
+ eq(api.getBackup().length,3);
+ await api.transact('Deposit',s=>{s.transactions.push({id:'D1',title:'Sponsor',kind:'deposit',amount:30000,eventAt:'2026-11-16T14:05',deleted:false})});
+ eq(api.summary().balance,2779500);
+ await api.transact('Refund',s=>{s.transactions.push({id:'R1',title:'Returned',kind:'refund',amount:10000,eventAt:'2026-11-16T14:20',deleted:false})});
+ eq(api.summary().balance,2769500);
+ await api.transact('Adjustment',s=>{s.transactions.push({id:'A1',title:'Correction',kind:'adjustment',amount:-4000000,eventAt:'2026-11-16T14:30',deleted:false})});
+ eq(api.summary().balance,-1230500);
+ api.goTab('reports');
+ assert(api.getHTML().includes('Financial reports'));
+ assert(api.getHTML().includes('৳12,305'));
+ assert(api.getHTML().includes('Export PDF'));
+ let output=api.buildPDF();assert((await output.arrayBuffer()).byteLength > 1000, "PDF should have content");
+ let backup=JSON.parse(JSON.stringify(api.get()));
+ await api.transact('New',s=>{s.transactions.push({id:'X1',title:'Extra',kind:'expense',amount:100,eventAt:'2026-11-16T16:00',deleted:false})});
+ await api.restoreState(backup,false,'test');
+ eq(api.get().transactions.length,5);
+ eq(api.getSafety().state.transactions.length,6);
+ console.log('PASS: finance math, paisa precision, latest 3 backups, edit/delete/restore, negative balance, PDF generation, safe restore, report UI');
+ console.log('Final balance', api.formatMoney(api.summary().balance));
+})().catch(err=>{console.error(err);process.exit(1)})
